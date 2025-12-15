@@ -26,5 +26,4 @@ This archive serves as a **historical repository** of proof-of-concept scripts d
 - **Cloudflare bypass** methodologies (now obsolete)
 - **IoT vulnerability** research frameworks
 - **Protocol manipulation** concept code
-
-- Donate(https://donatello.to/Adiru3)
+[Donate](https://donatello.to/Adiru3)
